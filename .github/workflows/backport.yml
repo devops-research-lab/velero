@@ -31,6 +31,11 @@ name: Backport merged pull request
 # changelog file), that label is copied to the backport PR so it isn't
 # flagged as missing a changelog either.
 #
+# Every commit on a backport branch (the cherry-picked commit(s), even from
+# the original author, plus the changelog rename commit) is re-signed with
+# the bot's Signed-off-by trailer via `git rebase --signoff`, so the DCO
+# check always passes regardless of whether the original commit had one.
+#
 # See: https://github.com/velero-io/velero/issues/9603
 
 on:
@@ -194,12 +199,19 @@ jobs:
           target_branches: ${{ steps.parse.outputs.branches }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Rename changelog file(s) to match backport PR number
+      - name: Rename changelog file(s) and ensure DCO signoff
         # The cherry-picked commit(s) still carry the source PR's changelog
         # filename (e.g. changelogs/unreleased/9795-kaovilai), which no
         # longer matches the new backport PR's number. Rename it on each
         # created backport branch so hack/changelog-check.sh passes and the
         # release notes cite the correct PR.
+        #
+        # Also ensure every commit on the backport branch passes the DCO
+        # check by re-signing it with the bot's Signed-off-by trailer via
+        # `git rebase --signoff`. This covers the cherry-picked commits
+        # (even when the original author's commit had no trailer) as well
+        # as the changelog rename commit added above; it preserves any
+        # existing Signed-off-by trailers rather than replacing them.
         if: steps.backport.outputs.created_pull_numbers != ''
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -217,27 +229,32 @@ jobs:
             fi
 
             branch=$(gh pr view "$new_pr" --repo "$REPO" --json headRefName -q .headRefName)
-            git fetch origin "$branch"
+            base_branch=$(gh pr view "$new_pr" --repo "$REPO" --json baseRefName -q .baseRefName)
+            git fetch origin "$branch" "$base_branch"
             git checkout -B "$branch" "origin/${branch}"
 
             files=(changelogs/unreleased/"${SOURCE_PR_NUMBER}"-*)
-            if [ ${#files[@]} -eq 0 ]; then
-              echo "No changelog file for PR ${SOURCE_PR_NUMBER} found on ${branch}; skipping."
-              continue
-            fi
-
-            changed=false
-            for old_file in "${files[@]}"; do
-              suffix=$(basename "$old_file" | sed -E "s/^${SOURCE_PR_NUMBER}-//")
-              new_file="changelogs/unreleased/${new_pr}-${suffix}"
-              if [ "$old_file" != "$new_file" ]; then
-                git mv "$old_file" "$new_file"
-                changed=true
+            if [ ${#files[@]} -gt 0 ]; then
+              for old_file in "${files[@]}"; do
+                suffix=$(basename "$old_file" | sed -E "s/^${SOURCE_PR_NUMBER}-//")
+                new_file="changelogs/unreleased/${new_pr}-${suffix}"
+                if [ "$old_file" != "$new_file" ]; then
+                  git mv "$old_file" "$new_file"
+                fi
+              done
+              if ! git diff --cached --quiet; then
+                git commit -m "Rename changelog to match backport PR #${new_pr}"
               fi
-            done
-
-            if [ "$changed" = true ]; then
-              git commit -m "Rename changelog to match backport PR #${new_pr}"
-              git push origin "HEAD:${branch}"
+            else
+              echo "No changelog file for PR ${SOURCE_PR_NUMBER} found on ${branch}; skipping rename."
             fi
+
+            # Add the bot's Signed-off-by trailer to every commit ahead of
+            # the target branch (cherry-picked commits + the rename commit).
+            if ! git rebase --signoff "origin/${base_branch}"; then
+              echo "::error::git rebase --signoff failed for PR #${new_pr} on branch ${branch}; aborting rebase, branch left unchanged." >&2
+              git rebase --abort
+              exit 1
+            fi
+            git push --force-with-lease origin "HEAD:${branch}"
           done

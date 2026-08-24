@@ -69,6 +69,10 @@ branches.
 - **Changelog-not-required:** if the source PR is labeled
   `kind/changelog-not-required`, that label is copied to the backport PR so
   it isn't flagged as missing a changelog.
+- **DCO signoff:** every commit on a backport branch is re-signed with the
+  bot's `Signed-off-by` trailer (`git rebase --signoff`), including
+  cherry-picked commits from the original author, so the DCO check always
+  passes on backport PRs.
 - Only repository **owners, members, and collaborators** may trigger these commands.
 
 ## General coding guidelines
