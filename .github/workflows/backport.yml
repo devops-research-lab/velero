@@ -27,6 +27,10 @@ name: Backport merged pull request
 # file is automatically renamed to <backport_pr>-<user> so that
 # hack/changelog-check.sh passes and release notes cite the correct PR.
 #
+# If the source PR is labeled `kind/changelog-not-required` (i.e. it has no
+# changelog file), that label is copied to the backport PR so it isn't
+# flagged as missing a changelog either.
+#
 # See: https://github.com/velero-io/velero/issues/9603
 
 on:
@@ -178,6 +182,9 @@ jobs:
         with:
           # Labels like `backport release-1.17` select the target branch.
           label_pattern: '^backport ([^ ]+)$'
+          # Carry over `kind/changelog-not-required` from the source PR so
+          # backport PRs of changelog-exempt changes aren't flagged as missing one.
+          copy_labels_pattern: '^kind/changelog-not-required$'
           # Prefer draft PRs with conflict markers over failing the job silently.
           experimental: |
             {

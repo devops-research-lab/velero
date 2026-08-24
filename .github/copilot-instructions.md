@@ -66,6 +66,9 @@ branches.
   PR's `changelogs/unreleased/<source_pr>-<user>` file. The workflow
   automatically renames it to `<backport_pr>-<user>` on the backport branch so
   `hack/changelog-check.sh` passes and release notes cite the correct PR.
+- **Changelog-not-required:** if the source PR is labeled
+  `kind/changelog-not-required`, that label is copied to the backport PR so
+  it isn't flagged as missing a changelog.
 - Only repository **owners, members, and collaborators** may trigger these commands.
 
 ## General coding guidelines
