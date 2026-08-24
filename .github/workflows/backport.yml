@@ -16,6 +16,11 @@ name: Backport merged pull request
 # In both cases multiple target branches can be space-delimited in a comment:
 #   /backport release-1.17 release-1.18
 #
+# As a shorthand, a bare release version (e.g. `1.17`) is automatically
+# expanded to the corresponding `release-1.17` branch, so `/backport 1.17`
+# and `/backport release-1.17` are equivalent. This works generically for
+# any `X.Y` version, e.g. `/backport 1.18 1.19`.
+#
 # See: https://github.com/velero-io/velero/issues/9603
 
 on:
@@ -89,6 +94,10 @@ jobs:
           fi
 
           for branch in $branches; do
+            # Shorthand: a bare version like "1.17" expands to "release-1.17".
+            if [[ "$branch" =~ ^[0-9]+\.[0-9]+$ ]]; then
+              branch="release-${branch}"
+            fi
             label="backport ${branch}"
             echo "Applying label: '${label}'"
             # Create the label if it does not exist yet (idempotent).
@@ -141,7 +150,16 @@ jobs:
           # (may be empty, falls back to labels).
           line=$(printf '%s' "$COMMENT_BODY" | head -n1 | tr -d '\r')
           branches=$(printf '%s' "$line" | sed -E 's#^/(backport|cherrypick)[[:space:]]*##')
-          echo "branches=${branches}" >> "$GITHUB_OUTPUT"
+
+          normalized=""
+          for branch in $branches; do
+            # Shorthand: a bare version like "1.17" expands to "release-1.17".
+            if [[ "$branch" =~ ^[0-9]+\.[0-9]+$ ]]; then
+              branch="release-${branch}"
+            fi
+            normalized="${normalized}${normalized:+ }${branch}"
+          done
+          echo "branches=${normalized}" >> "$GITHUB_OUTPUT"
 
       - uses: actions/checkout@v7
         with:

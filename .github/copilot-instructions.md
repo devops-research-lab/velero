@@ -60,6 +60,8 @@ branches.
   space-delimited: `/backport release-1.17 release-1.18`.  The label causes the
   backport to run automatically when the PR merges.
 - **After merge:** the same comment immediately creates the backport PR.
+- **Shorthand:** a bare version like `/backport 1.17` is automatically expanded
+  to `release-1.17`; this works generically for any `X.Y` version.
 - Only repository **owners, members, and collaborators** may trigger these commands.
 
 ## General coding guidelines
