@@ -62,6 +62,10 @@ branches.
 - **After merge:** the same comment immediately creates the backport PR.
 - **Shorthand:** a bare version like `/backport 1.17` is automatically expanded
   to `release-1.17`; this works generically for any `X.Y` version.
+- **Changelog filename:** the cherry-picked commit(s) carry over the source
+  PR's `changelogs/unreleased/<source_pr>-<user>` file. The workflow
+  automatically renames it to `<backport_pr>-<user>` on the backport branch so
+  `hack/changelog-check.sh` passes and release notes cite the correct PR.
 - Only repository **owners, members, and collaborators** may trigger these commands.
 
 ## General coding guidelines

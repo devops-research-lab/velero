@@ -21,6 +21,12 @@ name: Backport merged pull request
 # and `/backport release-1.17` are equivalent. This works generically for
 # any `X.Y` version, e.g. `/backport 1.18 1.19`.
 #
+# The cherry-picked commit(s) carry over the original PR's changelog file
+# (changelogs/unreleased/<source_pr>-<user>), which no longer matches the
+# backport PR's own number. After the backport PR is created, its changelog
+# file is automatically renamed to <backport_pr>-<user> so that
+# hack/changelog-check.sh passes and release notes cite the correct PR.
+#
 # See: https://github.com/velero-io/velero/issues/9603
 
 on:
@@ -166,6 +172,7 @@ jobs:
           fetch-depth: 0
 
       - name: Create backport pull requests
+        id: backport
         # Pin to commit SHA: workflow has contents/pull-requests write.
         uses: korthout/backport-action@2e830a1d0b8269505846ddd407a70876913ad1f8 # v4.6.0
         with:
@@ -179,3 +186,51 @@ jobs:
           # Empty when triggered by merge labels; set when `/backport` or `/cherrypick` includes branches.
           target_branches: ${{ steps.parse.outputs.branches }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Rename changelog file(s) to match backport PR number
+        # The cherry-picked commit(s) still carry the source PR's changelog
+        # filename (e.g. changelogs/unreleased/9795-kaovilai), which no
+        # longer matches the new backport PR's number. Rename it on each
+        # created backport branch so hack/changelog-check.sh passes and the
+        # release notes cite the correct PR.
+        if: steps.backport.outputs.created_pull_numbers != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          SOURCE_PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number }}
+          CREATED_PR_NUMBERS: ${{ steps.backport.outputs.created_pull_numbers }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          shopt -s nullglob
+          for new_pr in $CREATED_PR_NUMBERS; do
+            if [ "$new_pr" = "$SOURCE_PR_NUMBER" ]; then
+              continue
+            fi
+
+            branch=$(gh pr view "$new_pr" --repo "$REPO" --json headRefName -q .headRefName)
+            git fetch origin "$branch"
+            git checkout -B "$branch" "origin/${branch}"
+
+            files=(changelogs/unreleased/"${SOURCE_PR_NUMBER}"-*)
+            if [ ${#files[@]} -eq 0 ]; then
+              echo "No changelog file for PR ${SOURCE_PR_NUMBER} found on ${branch}; skipping."
+              continue
+            fi
+
+            changed=false
+            for old_file in "${files[@]}"; do
+              suffix=$(basename "$old_file" | sed -E "s/^${SOURCE_PR_NUMBER}-//")
+              new_file="changelogs/unreleased/${new_pr}-${suffix}"
+              if [ "$old_file" != "$new_file" ]; then
+                git mv "$old_file" "$new_file"
+                changed=true
+              fi
+            done
+
+            if [ "$changed" = true ]; then
+              git commit -m "Rename changelog to match backport PR #${new_pr}"
+              git push origin "HEAD:${branch}"
+            fi
+          done
