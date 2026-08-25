@@ -22,6 +22,10 @@ import (
 	"fmt"
 
 	"github.com/cockroachdb/errors"
+<<<<<<< HEAD
+=======
+	appsv1api "k8s.io/api/apps/v1"
+>>>>>>> 41687279a (fix node agent rediness check issue (#10397))
 	corev1api "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -80,6 +84,39 @@ func KbClientIsRunningInNode(ctx context.Context, namespace string, nodeName str
 	return isRunningInNode(ctx, namespace, nodeName, nil, kubeClient)
 }
 
+<<<<<<< HEAD
+=======
+// IsReady checks whether the node-agent daemonset has at least one ready pod
+// by inspecting the DaemonSet status.
+func IsReady(ctx context.Context, namespace string, crClient ctrlclient.Client) error {
+	dsLinux := new(appsv1api.DaemonSet)
+	if err := crClient.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: daemonSet}, dsLinux); err != nil {
+		dsLinux = nil
+		if !apierrors.IsNotFound(err) {
+			return errors.Wrap(err, "failed to get linux node-agent daemonset")
+		}
+	}
+
+	dsWindows := new(appsv1api.DaemonSet)
+	if err := crClient.Get(ctx, ctrlclient.ObjectKey{Namespace: namespace, Name: daemonsetWindows}, dsWindows); err != nil {
+		dsWindows = nil
+		if !apierrors.IsNotFound(err) {
+			return errors.Wrap(err, "failed to get windows node-agent daemonset")
+		}
+	}
+
+	if dsLinux != nil && dsLinux.Status.NumberReady > 0 {
+		return nil
+	}
+
+	if dsWindows != nil && dsWindows.Status.NumberReady > 0 {
+		return nil
+	}
+
+	return errors.New("node-agent is not ready: no ready pods found")
+}
+
+>>>>>>> 41687279a (fix node agent rediness check issue (#10397))
 // IsRunningInNode checks if the node agent pod is running properly in a specified node through controller client. If not, return the error found
 func IsRunningInNode(ctx context.Context, namespace string, nodeName string, crClient ctrlclient.Client) error {
 	return isRunningInNode(ctx, namespace, nodeName, crClient, nil)

@@ -335,7 +335,29 @@ func (p *pvcBackupItemAction) Execute(
 		return nil, nil, "", nil, err
 	}
 
+<<<<<<< HEAD
 	vs, err := p.getVolumeSnapshotReference(context.TODO(), pvc, backup)
+=======
+	// validate that the node-agent daemonset is ready when snapshot data movement with
+	// the built-in data mover is requested. Without this, the DataUpload CR will be
+	// created but never processed (the DataUpload controller runs inside node-agent),
+	// causing the backup to hang until itemOperationTimeout expires.
+	if boolptr.IsSetToTrue(backup.Spec.SnapshotMoveData) && datamover.IsBuiltInDataMover(backup.Spec.DataMover) {
+		if err := nodeagent.IsReady(ctx, backup.Namespace, p.crClient); err != nil {
+			p.log.WithError(err).Error("cannot perform snapshot data movement without running node-agent pods")
+			return nil, nil, "", nil, errors.Wrap(err, "CSI PVC BIA cannot proceed: node-agent is not ready for snapshot data movement")
+		}
+	}
+
+	policySnapshotClass, scErr := vh.GetSnapshotClass(item, kuberesource.PersistentVolumeClaims)
+	if scErr != nil {
+		p.log.WithError(scErr).Warn("failed to get snapshotClass from volume policy, proceeding without it")
+	} else if policySnapshotClass != "" {
+		p.log.Infof("Volume policy specifies snapshotClass=%s for PVC %s/%s", policySnapshotClass, pvc.Namespace, pvc.Name)
+	}
+
+	vs, err := p.getVolumeSnapshotReference(ctx, pvc, backup, policySnapshotClass)
+>>>>>>> 41687279a (fix node agent rediness check issue (#10397))
 	if err != nil {
 		return nil, nil, "", nil, err
 	}
