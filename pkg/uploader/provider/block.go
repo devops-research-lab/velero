@@ -134,7 +134,11 @@ func (bp *blockProvider) RunBackup(
 
 	snapshotInfo, _, err := blockBackupFunc(ctx, blkUploader, bp.bkRepo, path, realSource, cbtParam.Source, forceFull, parentSnapshot, cbtParam.Service, uploaderCfg, tags, log)
 
-	if err == block.ErrCanceled {
+	// errors.Is, not ==: the sentinel is wrapped twice on its way here, by
+	// block/uploader.go ("error backing up bdev %s") and again by
+	// block/snapshot.go ("Failed to run uploader backup for si %v"), so an
+	// equality check never matches and cancellation gets reported as a failure.
+	if errors.Is(err, block.ErrCanceled) {
 		log.Warn("Block backup is canceled")
 		return snapshotInfo.ID, false, snapshotInfo.Size, snapshotInfo.IncrementalSize, ErrorCanceled
 	}
@@ -150,7 +154,7 @@ func (bp *blockProvider) RunBackup(
 		},
 	)
 
-	log.Infof("Block backup finished, snapshot ID %s, backup size %d", snapshotInfo.ID, snapshotInfo.Size)
+	log.Infof("Block backup finished, snapshot ID %s, backup size %v, incremental size %v", snapshotInfo.ID, snapshotInfo.Size, snapshotInfo.IncrementalSize)
 
 	return snapshotInfo.ID, false, snapshotInfo.Size, snapshotInfo.IncrementalSize, nil
 }
@@ -159,6 +163,8 @@ func (bp *blockProvider) RunRestore(
 	ctx context.Context,
 	snapshotID string,
 	volumePath string,
+	incremental bool,
+	cbtParam CBTParam,
 	volMode uploader.PersistentVolumeMode,
 	uploaderCfg map[string]string,
 	updater uploader.ProgressUpdater) (int64, error) {
@@ -174,9 +180,10 @@ func (bp *blockProvider) RunRestore(
 
 	blkUploader := block.NewUploader(ctx, bp.bkRepo, updater, log)
 
-	size, err := blockRestoreFunc(ctx, blkUploader, bp.bkRepo, snapshotID, volumePath, uploaderCfg, log)
+	size, err := blockRestoreFunc(ctx, blkUploader, bp.bkRepo, snapshotID, volumePath, incremental, cbtParam.Source, cbtParam.Service, uploaderCfg, log)
 
-	if err == block.ErrCanceled {
+	// errors.Is, not ==: see the equivalent comment on the backup path above.
+	if errors.Is(err, block.ErrCanceled) {
 		log.Warn("Block restore is canceled")
 		return 0, ErrorCanceled
 	}

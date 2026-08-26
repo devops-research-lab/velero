@@ -22,6 +22,7 @@ import (
 
 	"github.com/cockroachdb/errors"
 	"github.com/sirupsen/logrus"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/vmware-tanzu/velero/internal/credentials"
@@ -57,6 +58,16 @@ type BackupStartParam struct {
 	VolumeID       string
 	ChangeID       string
 	SnapshotID     string
+	CBTService     cbtservice.Service
+}
+
+// RestoreStartParam define the input param for restore start
+type RestoreStartParam struct {
+	Incremental             bool
+	VolumeSnapshotNamespace string
+	VolumeSnapshotName      string
+	VolumeID                string
+	CBTService              cbtservice.Service
 }
 
 type generalDataPath struct {
@@ -199,6 +210,7 @@ func (dp *generalDataPath) StartBackup(source AccessPoint, uploaderConfig map[st
 					VolumeID: backupParam.VolumeID,
 					ChangeID: backupParam.ChangeID,
 				},
+				Service: backupParam.CBTService,
 			},
 			source.VolMode,
 			uploaderConfig,
@@ -214,19 +226,21 @@ func (dp *generalDataPath) StartBackup(source AccessPoint, uploaderConfig map[st
 			}
 			dp.callbacks.OnFailed(context.Background(), dp.namespace, dp.jobName, dataPathErr)
 		} else {
-			dp.callbacks.OnCompleted(context.Background(), dp.namespace, dp.jobName, Result{Backup: BackupResult{snapshotID, emptySnapshot, source, totalBytes, incrementalBytes}})
+			dp.callbacks.OnCompleted(context.Background(), dp.namespace, dp.jobName, Result{Backup: BackupResult{snapshotID, emptySnapshot, source, totalBytes, ptr.To(incrementalBytes)}})
 		}
 	}()
 
 	return nil
 }
 
-func (dp *generalDataPath) StartRestore(snapshotID string, target AccessPoint, uploaderConfigs map[string]string) error {
+func (dp *generalDataPath) StartRestore(snapshotID string, target AccessPoint, uploaderConfigs map[string]string, param any) error {
 	if !dp.initialized {
 		return errors.New("data path is not initialized")
 	}
 
 	dp.wgDataPath.Add(1)
+
+	restoreParam := param.(*RestoreStartParam)
 
 	go func() {
 		dp.log.Info("Start data path restore")
@@ -236,7 +250,14 @@ func (dp *generalDataPath) StartRestore(snapshotID string, target AccessPoint, u
 			dp.wgDataPath.Done()
 		}()
 
-		totalBytes, err := dp.uploaderProv.RunRestore(dp.ctx, snapshotID, target.ByPath, target.VolMode, uploaderConfigs, dp)
+		totalBytes, err := dp.uploaderProv.RunRestore(dp.ctx, snapshotID, target.ByPath, restoreParam.Incremental,
+			provider.CBTParam{
+				Source: cbtservice.SourceInfo{
+					Snapshot: restoreParam.VolumeSnapshotName,
+					VolumeID: restoreParam.VolumeID,
+				},
+				Service: restoreParam.CBTService,
+			}, target.VolMode, uploaderConfigs, dp)
 
 		if err == provider.ErrorCanceled {
 			dp.callbacks.OnCancelled(context.Background(), dp.namespace, dp.jobName)

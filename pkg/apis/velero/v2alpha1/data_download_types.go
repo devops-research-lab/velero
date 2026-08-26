@@ -32,12 +32,20 @@ type DataDownloadSpec struct {
 	BackupStorageLocation string `json:"backupStorageLocation"`
 
 	// DataMover specifies the data mover to be used by the backup.
-	// If DataMover is "" or "velero", the built-in data mover will be used.
+	// If DataMover is "" or "velero", the built-in fs data mover will be used.
 	// +optional
 	DataMover string `json:"datamover,omitempty"`
 
 	// SnapshotID is the ID of the Velero backup snapshot to be restored from.
 	SnapshotID string `json:"snapshotID"`
+
+	// RestoreType indicates the type of the restore.
+	RestoreType string `json:"restoreType"`
+
+	// CSISnapshot provides the information of the CSI snapshot used to do the incremental restore.
+	// +optional
+	// +nullable
+	CSISnapshot *CSISnapshotSpec `json:"csiSnapshot"`
 
 	// SourceNamespace is the original namespace where the volume is backed up from.
 	// It may be different from SourcePVC's namespace if namespace is remapped during restore.

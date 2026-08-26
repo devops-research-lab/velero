@@ -28,6 +28,11 @@ const (
 	defaultPodVolumeOperationTimeout  = 240 * time.Minute
 	defaultResourceTerminatingTimeout = 10 * time.Minute
 
+	// DefaultResourceTimeout is the default for --resource-timeout. It matches
+	// defaultResourceTerminatingTimeout so controller fallbacks stay aligned with
+	// server defaults (see pkg/cmd/server/config/config.go).
+	DefaultResourceTimeout = defaultResourceTerminatingTimeout
+
 	// server's client default qps and burst
 	defaultClientQPS      float32 = 100.0
 	defaultClientBurst    int     = 100
@@ -41,7 +46,7 @@ const (
 	defaultCSISnapshotTimeout   = 10 * time.Minute
 	defaultItemOperationTimeout = 4 * time.Hour
 
-	resourceTimeout = 10 * time.Minute
+	resourceTimeout = defaultResourceTerminatingTimeout
 
 	defaultMaxConcurrentK8SConnections = 30
 	defaultDisableInformerCache        = false
@@ -182,6 +187,8 @@ type Config struct {
 	ItemBlockWorkerCount                int
 	ConcurrentBackups                   int
 	GlobalBackupVolumePoliciesConfigMap string
+	DefaultResourceModifierConfigMap    string
+	MaxBackupExtractionSize             int
 }
 
 func GetDefaultConfig() *Config {
@@ -281,5 +288,17 @@ func (c *Config) BindFlags(flags *pflag.FlagSet) {
 		"global-backup-volume-policies-configmap",
 		c.GlobalBackupVolumePoliciesConfigMap,
 		"The name of a ConfigMap in the Velero install namespace holding global backup volume policies that are merged into every backup. Optional.",
+	)
+	flags.StringVar(
+		&c.DefaultResourceModifierConfigMap,
+		"default-resource-modifier-configmap",
+		c.DefaultResourceModifierConfigMap,
+		"The name of a ConfigMap in the Velero namespace containing default resource modifier rules applied to all restores. Ignored when a per-restore resource modifier is specified.",
+	)
+	flags.IntVar(
+		&c.MaxBackupExtractionSize,
+		"max-backup-extraction-size",
+		c.MaxBackupExtractionSize,
+		"Maximum size of a backup extraction in megabytes. If not set, default value (16GB) will be used.",
 	)
 }
