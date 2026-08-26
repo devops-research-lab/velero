@@ -44,6 +44,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/dynamic"
+	k8sfake "k8s.io/client-go/kubernetes/fake"
 	kubetesting "k8s.io/client-go/testing"
 
 	"github.com/vmware-tanzu/velero/internal/volume"
@@ -60,6 +61,7 @@ import (
 	vsv1 "github.com/vmware-tanzu/velero/pkg/plugin/velero/volumesnapshotter/v1"
 	"github.com/vmware-tanzu/velero/pkg/podvolume"
 	uploadermocks "github.com/vmware-tanzu/velero/pkg/podvolume/mocks"
+	riav1 "github.com/vmware-tanzu/velero/pkg/restore/actions"
 	"github.com/vmware-tanzu/velero/pkg/test"
 	"github.com/vmware-tanzu/velero/pkg/types"
 	"github.com/vmware-tanzu/velero/pkg/util/kube"
@@ -813,6 +815,87 @@ func TestRestoreResourceFiltering(t *testing.T) {
 	}
 }
 
+func TestRestoreMustHaveResourceNamespaceEnforcement(t *testing.T) {
+	tests := []struct {
+		name         string
+		restore      *velerov1api.Restore
+		backup       *velerov1api.Backup
+		apiResources []*test.APIResource
+		tarball      io.Reader
+		want         map[*test.APIResource][]string
+		expectError  bool
+	}{
+		{
+			name:    "resourceMustHave item in velero namespace is restored",
+			restore: defaultRestore().IncludedNamespaces("velero").Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("datauploads.velero.io",
+					builder.ForDataUpload("velero", "du-1").Result(),
+				).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.DataUploads(),
+			},
+			want: map[*test.APIResource][]string{
+				test.DataUploads(): {"velero/du-1"},
+			},
+			expectError: false,
+		},
+		{
+			name:    "resourceMustHave item outside velero namespace is rejected and produces error",
+			restore: defaultRestore().IncludedNamespaces("app-foo").Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("datauploads.velero.io",
+					builder.ForDataUpload("attacker-ns", "du-2").Result(),
+				).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.DataUploads(),
+			},
+			want: map[*test.APIResource][]string{
+				test.DataUploads(): {},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+
+			for _, r := range tc.apiResources {
+				h.DiscoveryClient.WithAPIResource(r)
+			}
+			require.NoError(t, h.restorer.discoveryHelper.Refresh())
+
+			resPolicies, err := resourcepolicies.GetResourcePoliciesFromRestore(t.Context(), tc.restore, h.restorer.kbClient, h.log)
+			require.NoError(t, err)
+
+			data := &Request{
+				Log:          h.log,
+				Restore:      tc.restore,
+				Backup:       tc.backup,
+				BackupReader: tc.tarball,
+				ResPolicies:  resPolicies,
+			}
+			_, errs := h.restorer.Restore(
+				data,
+				nil,
+				nil,
+			)
+
+			if tc.expectError {
+				assert.False(t, errs.IsEmpty(), "expected errors but got empty")
+			} else {
+				assert.True(t, errs.IsEmpty(), "expected no errors but got %v", errs)
+			}
+			assertAPIContents(t, h, tc.want)
+		})
+	}
+}
+
 // TestRestoreNamespaceMapping runs restores with namespace mappings specified,
 // and verifies that the set of items created in the API are in the correct
 // namespaces. Validation is done by looking at the namespaces/names of the items
@@ -1086,6 +1169,7 @@ func TestRestoreItems(t *testing.T) {
 		apiResources         []*test.APIResource
 		tarball              io.Reader
 		want                 []*test.APIResource
+		wantWarnings         Result
 		expectedRestoreItems map[itemKey]restoredItemStatus
 		disableInformer      bool
 	}{
@@ -1329,6 +1413,52 @@ func TestRestoreItems(t *testing.T) {
 			},
 		},
 		{
+			name:    "mark item as skipped when pod exists in cluster and is different from backed up one, existing resource policy is none",
+			restore: defaultRestore().ExistingResourcePolicy("none").Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("pods", builder.ForPod("ns-1", "pod-1").ObjectMeta(builder.WithLabels("app", "backed-up")).Result()).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.Pods(builder.ForPod("ns-1", "pod-1").ObjectMeta(builder.WithLabels("app", "in-cluster")).Result()),
+			},
+			want: []*test.APIResource{
+				test.Pods(builder.ForPod("ns-1", "pod-1").ObjectMeta(builder.WithLabels("app", "in-cluster")).Result()),
+			},
+			wantWarnings: Result{
+				Namespaces: map[string][]string{
+					"ns-1": {"could not restore, Pod \"pod-1\" already exists. Warning: the in-cluster version is different than the backed-up version"},
+				},
+			},
+			expectedRestoreItems: map[itemKey]restoredItemStatus{
+				{resource: "v1/Namespace", namespace: "", name: "ns-1"}: {action: "created", itemExists: true, createdName: "ns-1"},
+				{resource: "v1/Pod", namespace: "ns-1", name: "pod-1"}:  {action: "skipped", itemExists: true},
+			},
+		},
+		{
+			name:    "mark item as skipped when pod exists in cluster and is different from backed up one, existing resource policy is not specified",
+			restore: defaultRestore().Result(),
+			backup:  defaultBackup().Result(),
+			tarball: test.NewTarWriter(t).
+				AddItems("pods", builder.ForPod("ns-1", "pod-1").ObjectMeta(builder.WithLabels("app", "backed-up")).Result()).
+				Done(),
+			apiResources: []*test.APIResource{
+				test.Pods(builder.ForPod("ns-1", "pod-1").ObjectMeta(builder.WithLabels("app", "in-cluster")).Result()),
+			},
+			want: []*test.APIResource{
+				test.Pods(builder.ForPod("ns-1", "pod-1").ObjectMeta(builder.WithLabels("app", "in-cluster")).Result()),
+			},
+			wantWarnings: Result{
+				Namespaces: map[string][]string{
+					"ns-1": {"could not restore, Pod:pod-1 already exists. Warning: the in-cluster version is different than the backed-up version"},
+				},
+			},
+			expectedRestoreItems: map[itemKey]restoredItemStatus{
+				{resource: "v1/Namespace", namespace: "", name: "ns-1"}: {action: "created", itemExists: true, createdName: "ns-1"},
+				{resource: "v1/Pod", namespace: "ns-1", name: "pod-1"}:  {action: "skipped", itemExists: true},
+			},
+		},
+		{
 			name:    "service account secrets and image pull secrets are restored when service account already exists in cluster",
 			restore: defaultRestore().Result(),
 			backup:  defaultBackup().Result(),
@@ -1437,7 +1567,12 @@ func TestRestoreItems(t *testing.T) {
 				nil, // volume snapshotter getter
 			)
 
-			assertEmptyResults(t, warnings, errs)
+			if tc.wantWarnings.IsEmpty() {
+				assertEmptyResults(t, warnings)
+			} else {
+				assertWantErrsOrWarnings(t, tc.wantWarnings, warnings)
+			}
+			assertEmptyResults(t, errs)
 			assertRestoredItems(t, h, tc.want)
 			if len(tc.expectedRestoreItems) > 0 {
 				assert.Equal(t, tc.expectedRestoreItems, data.RestoredItems)
@@ -2716,6 +2851,185 @@ func TestRestoreMustIncludeAdditionalItems(t *testing.T) {
 			test.VolumeSnapshots():        {"ns-1/vs-1"},
 			test.VolumeSnapshotContents(): {"/vsc-1"},
 		})
+	})
+}
+
+// TestRestoreInplaceSelectedNodeCarrierAnnotation verifies the engine translates the
+// Velero-internal in-place restore carrier annotation into the Kubernetes selected-node
+// annotation after all RestoreItemActions have run, and always strips the carrier.
+func TestRestoreInplaceSelectedNodeCarrierAnnotation(t *testing.T) {
+	t.Run("carrier annotation is translated to selected-node and stripped", func(t *testing.T) {
+		h := newHarness(t)
+		h.AddItems(t, test.PVCs())
+
+		data := &Request{
+			Log:     h.log,
+			Restore: defaultRestore().Result(),
+			Backup:  defaultBackup().Result(),
+			BackupReader: test.NewTarWriter(t).
+				AddItems("persistentvolumeclaims", builder.ForPersistentVolumeClaim("ns-1", "pvc-1").Result()).
+				Done(),
+		}
+		warnings, errs := h.restorer.Restore(
+			data,
+			[]riav2.RestoreItemAction{
+				// Simulates the PVC CSI RIA setting the carrier during an in-place restore.
+				&pluggableAction{
+					executeFunc: func(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+						item := input.Item.(*unstructured.Unstructured)
+						annotations := item.GetAnnotations()
+						if annotations == nil {
+							annotations = map[string]string{}
+						}
+						annotations[velerov1api.InplaceRestoreSelectedNodeAnnotation] = "node-1"
+						item.SetAnnotations(annotations)
+						return &velero.RestoreItemActionExecuteOutput{UpdatedItem: item}, nil
+					},
+				},
+				// The real generic PVC RIA (velero.io/pvc), which unconditionally strips the
+				// Kubernetes selected-node annotation. Running it after the carrier-setting
+				// action proves the carrier survives the real strip regardless of action order.
+				&pluggableAction{
+					executeFunc: func(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+						clientset := k8sfake.NewSimpleClientset()
+						return riav1.NewPVCAction(
+							h.log,
+							clientset.CoreV1().ConfigMaps("velero"),
+							clientset.CoreV1().Nodes(),
+						).Execute(input)
+					},
+				},
+			},
+			nil,
+		)
+
+		assertEmptyResults(t, warnings, errs)
+
+		got, err := h.DynamicClient.Resource(test.PVCs().GVR()).Namespace("ns-1").Get(t.Context(), "pvc-1", metav1.GetOptions{})
+		require.NoError(t, err)
+		annotations := got.GetAnnotations()
+		assert.Equal(t, "node-1", annotations["volume.kubernetes.io/selected-node"])
+		assert.NotContains(t, annotations, velerov1api.InplaceRestoreSelectedNodeAnnotation)
+	})
+
+	t.Run("empty carrier annotation is stripped without setting selected-node", func(t *testing.T) {
+		h := newHarness(t)
+		h.AddItems(t, test.PVCs())
+
+		data := &Request{
+			Log:     h.log,
+			Restore: defaultRestore().Result(),
+			Backup:  defaultBackup().Result(),
+			BackupReader: test.NewTarWriter(t).
+				AddItems("persistentvolumeclaims", builder.ForPersistentVolumeClaim("ns-1", "pvc-1").Result()).
+				Done(),
+		}
+		warnings, errs := h.restorer.Restore(
+			data,
+			[]riav2.RestoreItemAction{
+				&pluggableAction{
+					executeFunc: func(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+						item := input.Item.(*unstructured.Unstructured)
+						annotations := item.GetAnnotations()
+						if annotations == nil {
+							annotations = map[string]string{}
+						}
+						annotations[velerov1api.InplaceRestoreSelectedNodeAnnotation] = ""
+						item.SetAnnotations(annotations)
+						return &velero.RestoreItemActionExecuteOutput{UpdatedItem: item}, nil
+					},
+				},
+			},
+			nil,
+		)
+
+		assertEmptyResults(t, warnings, errs)
+
+		got, err := h.DynamicClient.Resource(test.PVCs().GVR()).Namespace("ns-1").Get(t.Context(), "pvc-1", metav1.GetOptions{})
+		require.NoError(t, err)
+		annotations := got.GetAnnotations()
+		assert.NotContains(t, annotations, "volume.kubernetes.io/selected-node")
+		assert.NotContains(t, annotations, velerov1api.InplaceRestoreSelectedNodeAnnotation)
+	})
+
+	t.Run("no carrier annotation leaves selected-node stripped (PVC-absent fallback)", func(t *testing.T) {
+		h := newHarness(t)
+		h.AddItems(t, test.PVCs())
+
+		data := &Request{
+			Log:     h.log,
+			Restore: defaultRestore().Result(),
+			Backup:  defaultBackup().Result(),
+			BackupReader: test.NewTarWriter(t).
+				AddItems("persistentvolumeclaims", builder.ForPersistentVolumeClaim("ns-1", "pvc-1").
+					ObjectMeta(builder.WithAnnotations("volume.kubernetes.io/selected-node", "stale-node")).Result()).
+				Done(),
+		}
+		warnings, errs := h.restorer.Restore(
+			data,
+			[]riav2.RestoreItemAction{
+				// Simulates the generic PVC RIA stripping the annotation; no action sets the
+				// carrier (as when the target PVC does not exist and Velero falls back to
+				// provisioning a new PVC).
+				&pluggableAction{
+					executeFunc: func(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+						item := input.Item.(*unstructured.Unstructured)
+						annotations := item.GetAnnotations()
+						delete(annotations, "volume.kubernetes.io/selected-node")
+						item.SetAnnotations(annotations)
+						return &velero.RestoreItemActionExecuteOutput{UpdatedItem: item}, nil
+					},
+				},
+			},
+			nil,
+		)
+
+		assertEmptyResults(t, warnings, errs)
+
+		got, err := h.DynamicClient.Resource(test.PVCs().GVR()).Namespace("ns-1").Get(t.Context(), "pvc-1", metav1.GetOptions{})
+		require.NoError(t, err)
+		assert.NotContains(t, got.GetAnnotations(), "volume.kubernetes.io/selected-node")
+	})
+
+	t.Run("carrier annotation baked into backup metadata is not trusted when no action sets it", func(t *testing.T) {
+		h := newHarness(t)
+		h.AddItems(t, test.PVCs())
+
+		data := &Request{
+			Log:     h.log,
+			Restore: defaultRestore().Result(),
+			Backup:  defaultBackup().Result(),
+			BackupReader: test.NewTarWriter(t).
+				AddItems("persistentvolumeclaims", builder.ForPersistentVolumeClaim("ns-1", "pvc-1").
+					ObjectMeta(builder.WithAnnotations(velerov1api.InplaceRestoreSelectedNodeAnnotation, "stale-node")).Result()).
+				Done(),
+		}
+		warnings, errs := h.restorer.Restore(
+			data,
+			// No action sets the carrier during this restore (as in the PVC-absent fallback
+			// path where a new PVC is dynamically provisioned), so the carrier from the
+			// backup metadata must be stripped and never translated into selected-node.
+			[]riav2.RestoreItemAction{
+				&pluggableAction{
+					executeFunc: func(input *velero.RestoreItemActionExecuteInput) (*velero.RestoreItemActionExecuteOutput, error) {
+						item := input.Item.(*unstructured.Unstructured)
+						// The stale carrier from the backup must already be gone before
+						// RestoreItemActions execute.
+						assert.NotContains(t, item.GetAnnotations(), velerov1api.InplaceRestoreSelectedNodeAnnotation)
+						return &velero.RestoreItemActionExecuteOutput{UpdatedItem: item}, nil
+					},
+				},
+			},
+			nil,
+		)
+
+		assertEmptyResults(t, warnings, errs)
+
+		got, err := h.DynamicClient.Resource(test.PVCs().GVR()).Namespace("ns-1").Get(t.Context(), "pvc-1", metav1.GetOptions{})
+		require.NoError(t, err)
+		annotations := got.GetAnnotations()
+		assert.NotContains(t, annotations, "volume.kubernetes.io/selected-node")
+		assert.NotContains(t, annotations, velerov1api.InplaceRestoreSelectedNodeAnnotation)
 	})
 }
 

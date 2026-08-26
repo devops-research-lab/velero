@@ -1004,6 +1004,19 @@ func (ctx *restoreContext) processSelectedResource(
 					targetNS = namespace
 				}
 			}
+
+			// Make sure the resource in the "resourceMustHave" set will always be created in the namespace where velero is installed.
+			if ctx.resourceMustHave.Has(groupResource.String()) && targetNS != "" && targetNS != ctx.restore.Namespace {
+				err := fmt.Errorf("resource %s/%s is must-have per velero internal setting, and is namespace-scoped, but its target namespace %q is not Velero's namespace %q", groupResource.String(), selectedItem.name, targetNS, ctx.restore.Namespace)
+				ctx.log.WithFields(logrus.Fields{
+					"resource":        groupResource.String(),
+					"name":            selectedItem.name,
+					"targetNamespace": targetNS,
+					"veleroNamespace": ctx.restore.Namespace,
+				}).Error(err.Error())
+				errs.Add(targetNS, err)
+				continue
+			}
 			// If we don't know whether this namespace exists yet, attempt to create
 			// it in order to ensure it exists. Try to get it from the backup tarball
 			// (in order to get any backed-up metadata), but if we don't find it there,
@@ -1623,6 +1636,19 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		return warnings, errs, itemExists
 	}
 
+	// Strip any pre-existing Velero-internal in-place restore carrier annotation coming from
+	// the backup metadata before RestoreItemActions run. The carrier is only trusted when it
+	// is set by a RestoreItemAction (the PVC CSI RIA) during this restore; a stale carrier
+	// baked into the backup must not be translated into the Kubernetes "selected-node"
+	// annotation, which could pin a newly provisioned PVC to a stale node.
+	if annotations := obj.GetAnnotations(); annotations != nil {
+		if _, present := annotations[velerov1api.InplaceRestoreSelectedNodeAnnotation]; present {
+			restoreLogger.Infof("Removing pre-existing %q annotation from backup metadata", velerov1api.InplaceRestoreSelectedNodeAnnotation)
+			delete(annotations, velerov1api.InplaceRestoreSelectedNodeAnnotation)
+			obj.SetAnnotations(annotations)
+		}
+	}
+
 	restoreLogger.Infof("restore status includes excludes: %+v", ctx.resourceStatusIncludesExcludes)
 
 	for _, action := range ctx.getApplicableActions(groupResource, namespace) {
@@ -1752,6 +1778,23 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			errs.Add(namespace, errors.Wrapf(err, "error verifying additional items are ready to use"))
 		} else if !available {
 			errs.Add(namespace, fmt.Errorf("additional items for %s are not ready to use", resourceID))
+		}
+	}
+
+	// Translate the Velero-internal carrier annotation (set by the PVC CSI RestoreItemAction
+	// during an in-place volume data restore) back to the Kubernetes "selected-node" annotation.
+	// This runs after all RestoreItemActions so the result does not depend on the order in which
+	// the actions executed: the generic PVC RIA unconditionally strips the Kubernetes annotation,
+	// while the carrier annotation passes through untouched. The carrier itself is always
+	// stripped so it never lands on the cluster.
+	if annotations := obj.GetAnnotations(); annotations != nil {
+		if selectedNode, present := annotations[velerov1api.InplaceRestoreSelectedNodeAnnotation]; present {
+			if selectedNode != "" {
+				restoreLogger.Infof("Restoring %q annotation with value %q from in-place restore carrier annotation", kube.KubeAnnSelectedNode, selectedNode)
+				annotations[kube.KubeAnnSelectedNode] = selectedNode
+			}
+			delete(annotations, velerov1api.InplaceRestoreSelectedNodeAnnotation)
+			obj.SetAnnotations(annotations)
 		}
 	}
 
@@ -1930,7 +1973,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 				if err != nil {
 					warnings.Add(namespace, err)
 					// check if there is existingResourcePolicy and if it is set to update policy
-					if len(ctx.restore.Spec.ExistingResourcePolicy) > 0 && ctx.restore.Spec.ExistingResourcePolicy == velerov1api.PolicyTypeUpdate {
+					if len(ctx.restore.Spec.ExistingResourcePolicy) > 0 && ctx.restore.Spec.ExistingResourcePolicy == velerov1api.ResourcePolicyTypeUpdate {
 						// remove restore labels so that we apply the latest backup/restore names on the object via patch
 						removeRestoreLabels(fromCluster)
 						//try patching just the backup/restore labels
@@ -1950,12 +1993,14 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 					restoreLogger.Infof("restore API has resource policy defined %s, executing restore workflow accordingly for changed resource %s %s", resourcePolicy, fromCluster.GroupVersionKind().Kind, kube.NamespaceAndName(fromCluster))
 
 					// existingResourcePolicy is set as none, add warning
-					if resourcePolicy == velerov1api.PolicyTypeNone {
+					if resourcePolicy == velerov1api.ResourcePolicyTypeNone {
 						e := errors.Errorf("could not restore, %s %q already exists. Warning: the in-cluster version is different than the backed-up version",
 							obj.GetKind(), obj.GetName())
 						warnings.Add(namespace, e)
+						itemStatus.action = ItemRestoreResultSkipped
+						ctx.restoredItems[itemKey] = itemStatus
 						// existingResourcePolicy is set as update, attempt patch on the resource and add warning if it fails
-					} else if resourcePolicy == velerov1api.PolicyTypeUpdate {
+					} else if resourcePolicy == velerov1api.ResourcePolicyTypeUpdate {
 						// processing update as existingResourcePolicy
 						warningsFromUpdateRP, errsFromUpdateRP := ctx.processUpdateResourcePolicy(fromCluster, fromClusterWithLabels, obj, namespace, resourceClient)
 						if warningsFromUpdateRP.IsEmpty() && errsFromUpdateRP.IsEmpty() {
@@ -1969,6 +2014,8 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 					// Preserved Velero behavior when existingResourcePolicy is not specified by the user
 					e := errors.Errorf("could not restore, %s:%s already exists. Warning: the in-cluster version is different than the backed-up version",
 						obj.GetKind(), obj.GetName())
+					itemStatus.action = ItemRestoreResultSkipped
+					ctx.restoredItems[itemKey] = itemStatus
 					warnings.Add(namespace, e)
 				}
 			}
@@ -1976,7 +2023,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 		}
 
 		//update backup/restore labels on the unchanged resources if existingResourcePolicy is set as update
-		if ctx.restore.Spec.ExistingResourcePolicy == velerov1api.PolicyTypeUpdate {
+		if ctx.restore.Spec.ExistingResourcePolicy == velerov1api.ResourcePolicyTypeUpdate {
 			resourcePolicy := ctx.restore.Spec.ExistingResourcePolicy
 			restoreLogger.Infof("restore API has resource policy defined %s, executing restore workflow accordingly for unchanged resource %s %s ", resourcePolicy, obj.GroupVersionKind().Kind, kube.NamespaceAndName(fromCluster))
 			// remove restore labels so that we apply the latest backup/restore names on the object via patch
@@ -2068,10 +2115,7 @@ func (ctx *restoreContext) restoreItem(obj *unstructured.Unstructured, groupReso
 			return warnings, errs, itemExists
 		}
 
-		// Do not create podvolumerestore when current restore excludes pv/pvc
-		if ctx.resourceIncludesExcludes.ShouldInclude(kuberesource.PersistentVolumeClaims.String()) &&
-			ctx.resourceIncludesExcludes.ShouldInclude(kuberesource.PersistentVolumes.String()) &&
-			len(podvolume.GetVolumeBackupsForPod(ctx.podVolumeBackups, pod, originalNamespace)) > 0 {
+		if len(podvolume.GetVolumeBackupsForPod(ctx.podVolumeBackups, pod, originalNamespace)) > 0 {
 			restorePodVolumeBackups(ctx, createdObj, originalNamespace)
 		}
 	}
@@ -2829,7 +2873,7 @@ func (ctx *restoreContext) getSelectedRestoreableItems(resource string, original
 				}
 
 				if skipItem {
-					ctx.log.Infof("restore orSelector labels did not match, skipping restore of item: %s", skipItem, item)
+					ctx.log.Infof("restore orSelector labels did not match, skipping restore of item: %s", item)
 					continue
 				}
 			}
