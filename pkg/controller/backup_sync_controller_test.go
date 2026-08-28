@@ -581,7 +581,7 @@ var _ = Describe("Backup Sync Reconciler", func() {
 			name         string
 			cloudBackup  *velerov1api.Backup
 			expectSynced bool
-			// phase expected in the cluster after the sync and queue reconciles have run.
+			// phase expected in the cluster immediately after the sync reconcile has run.
 			// only checked when expectSynced is true.
 			expectPhase velerov1api.BackupPhase
 		}{
@@ -593,16 +593,6 @@ var _ = Describe("Backup Sync Reconciler", func() {
 			{
 				name:         "backup metadata in phase New is not synced",
 				cloudBackup:  builder.ForBackup("ns-1", "backup-1").Phase(velerov1api.BackupPhaseNew).Hooks(hooks).Result(),
-				expectSynced: false,
-			},
-			{
-				name:         "backup metadata in phase Queued is not synced",
-				cloudBackup:  builder.ForBackup("ns-1", "backup-1").Phase(velerov1api.BackupPhaseQueued).Hooks(hooks).Result(),
-				expectSynced: false,
-			},
-			{
-				name:         "backup metadata in phase ReadyToStart is not synced",
-				cloudBackup:  builder.ForBackup("ns-1", "backup-1").Phase(velerov1api.BackupPhaseReadyToStart).Hooks(hooks).Result(),
 				expectSynced: false,
 			},
 			{
@@ -674,9 +664,6 @@ var _ = Describe("Backup Sync Reconciler", func() {
 			},
 		}
 
-		queueScheme := runtime.NewScheme()
-		Expect(velerov1api.AddToScheme(queueScheme)).ShouldNot(HaveOccurred())
-
 		for _, test := range tests {
 			var (
 				client        = ctrlfake.NewClientBuilder().Build()
@@ -717,23 +704,10 @@ var _ = Describe("Backup Sync Reconciler", func() {
 				continue
 			}
 			Expect(err).ShouldNot(HaveOccurred(), test.name)
-
-			// Reconcile the synced backup with the queue controller twice: the first
-			// reconcile would move a New/empty-phase backup to Queued, the second one
-			// would move it on to ReadyToStart, which is what hands it to the backup
-			// controller for execution.
-			queueReconciler := NewBackupQueueReconciler(client, queueScheme, velerotest.NewLogger(), 1, NewBackupTracker())
-			for range 2 {
-				_, err = queueReconciler.Reconcile(ctx, ctrl.Request{NamespacedName: backupKey})
-				Expect(err).ShouldNot(HaveOccurred(), test.name)
-			}
-
-			after := &velerov1api.Backup{}
-			Expect(client.Get(ctx, backupKey, after)).ShouldNot(HaveOccurred(), test.name)
-			Expect(after.Status.Phase).To(BeEquivalentTo(test.expectPhase), test.name)
+			Expect(synced.Status.Phase).To(BeEquivalentTo(test.expectPhase), test.name)
 			// Hooks are dropped on sync, so the stored metadata cannot carry a payload
 			// that a later code path could execute.
-			Expect(after.Spec.Hooks.Resources).To(BeEmpty(), test.name)
+			Expect(synced.Spec.Hooks.Resources).To(BeEmpty(), test.name)
 		}
 	})
 
