@@ -460,7 +460,7 @@ func TestBackupDeletionControllerReconcile(t *testing.T) {
 		td.backupStore.On("GetBackupContents", input.Spec.BackupName).Return(io.NopCloser(bytes.NewReader([]byte("hello world"))), nil)
 		td.backupStore.On("DeleteBackup", input.Spec.BackupName).Return(nil)
 
-		_, err := td.controller.Reconcile(t.Context(), td.req)
+		_, err := td.controller.Reconcile(context.TODO(), td.req)
 		require.NoError(t, err)
 
 		td.backupStore.AssertCalled(t, "DeleteBackup", input.Spec.BackupName)
